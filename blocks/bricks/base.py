@@ -530,9 +530,6 @@ class Brick(Annotation):
         self.children = []
         self.parents = []
 
-        self.allocation_args = []
-        self.initialization_args = []
-
         self.allocated = False
         self.allocation_config_pushed = False
         self.initialized = False
@@ -583,9 +580,12 @@ class Brick(Annotation):
         reset the parameters.
 
         """
-        if any(getattr(self, arg) is NoneAllocation
-               for arg in self.allocation_args):
-            raise ValueError('allocation config not set')
+        if hasattr(self, 'allocation_args'):
+            missing_config = [arg for arg in self.allocation_args
+                              if getattr(self, arg) is NoneAllocation]
+            if missing_config:
+                raise ValueError('allocation config not set: '
+                                 '{}'.format(', '.join(missing_config)))
         if not self.allocation_config_pushed:
             self.push_allocation_config()
         for child in self.children:
@@ -618,9 +618,12 @@ class Brick(Annotation):
         call the :meth:`allocate` method in order to do so.
 
         """
-        if any(getattr(self, arg) is NoneInitialization
-               for arg in self.initialization_args):
-            raise ValueError('initialization config not set')
+        if hasattr(self, 'initialization_args'):
+            missing_config = [arg for arg in self.initialization_args
+                              if getattr(self, arg) is NoneInitialization]
+            if missing_config:
+                raise ValueError('initialization config not set: '
+                                 '{}'.format(', '.join(missing_config)))
         if not self.allocated:
             self.allocate()
         if not self.initialization_config_pushed:
@@ -800,8 +803,10 @@ def lazy(allocation=None, initialization=None):
 
         def lazy_init(*args, **kwargs):
             self = args[0]
-            self.allocation_args = allocation
-            self.initialization_args = initialization
+            self.allocation_args = (getattr(self, 'allocation_args',
+                                            []) + allocation)
+            self.initialization_args = (getattr(self, 'initialization_args',
+                                                []) + initialization)
             kwargs = merge_with(strict_merge, args_to_kwargs(args, init),
                                 kwargs)
             for allocation_arg in allocation:
