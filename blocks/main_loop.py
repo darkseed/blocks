@@ -1,7 +1,12 @@
 """The event-based main loop of Blocks."""
 import signal
 import logging
+import time
 import traceback
+from functools import partial
+from operator import add
+
+from toolz import dissoc, update_in
 
 from blocks import config
 from blocks.log import TrainingLog
@@ -40,6 +45,47 @@ no_model_message = """
 
 A possible reason: one of your extensions requires the main loop to have \
 a model. Check documentation of your extensions."""
+
+
+class Timer(object):
+    def __init__(self):
+        self.total = {}
+        self.current = []
+
+    def enter(self, name):
+        self.current.append(name)
+
+    def exit(self, t):
+        self.total = update_in(self.total, self.current + ['total'],
+                               partial(add, t), 0)
+        self.current.pop()
+
+    def report(self):
+        total = sum(v['total'] for v in self.total.values())
+
+        def print_report(node, level=1):
+            for key, item in node.items():
+                if key == 'total':
+                    continue
+                print('{}{}: {:.2} ({:.2%}, {:.2%})'.format(
+                    level * '  ', key, item['total'],
+                    item['total'] / node.get('total', total),
+                    item['total'] / total))
+                print_report(item, level + 1)
+        print_report(self.total)
+
+
+class TimeIt(object):
+    def __init__(self, name, timer):
+        self.name = name
+        self.timer = timer
+
+    def __enter__(self):
+        self.timer.enter(self.name)
+        self.start = time.clock()
+
+    def __exit__(self, *args):
+        self.timer.exit(time.clock() - self.start)
 
 
 class MainLoop(object):
@@ -93,6 +139,8 @@ class MainLoop(object):
         self.algorithm = algorithm
         self.log = log
         self.extensions = extensions
+
+        self.timer = Timer()
 
         self._model = model
 
@@ -154,7 +202,8 @@ class MainLoop(object):
                     for extension in self.extensions:
                         extension.main_loop = self
                     self._run_extensions('before_training')
-                    self.algorithm.initialize()
+                    with TimeIt('initialization', self.timer):
+                        self.algorithm.initialize()
                     self.status._training_started = True
                 # We can not write "else:" here because extensions
                 # called "before_training" could have changed the status
@@ -163,8 +212,9 @@ class MainLoop(object):
                     self._run_extensions('on_resumption')
                     self.status._epoch_interrupt_received = False
                     self.status._batch_interrupt_received = False
-                while self._run_epoch():
-                    pass
+                with TimeIt('training', self.timer):
+                    while self._run_epoch():
+                        pass
             except TrainingFinish:
                 self.log.current_row.training_finished = True
             except Exception as e:
@@ -182,6 +232,7 @@ class MainLoop(object):
                 if self.log.current_row.training_finished:
                     self._run_extensions('after_training')
                 self._restore_signal_handlers()
+                import ipdb; ipdb.set_trace()
 
     def find_extension(self, name):
         """Find an extension with a given name.
@@ -209,8 +260,9 @@ class MainLoop(object):
                 return False
             self.status._epoch_started = True
             self._run_extensions('before_epoch')
-        while self._run_iteration():
-            pass
+        with TimeIt('epoch', self.timer):
+            while self._run_iteration():
+                pass
         self.status._epoch_started = False
         self.status.epochs_done += 1
         self.status._epoch_ends.append(self.status.iterations_done)
@@ -227,15 +279,18 @@ class MainLoop(object):
             return False
         self.log.status._received_first_batch = True
         self._run_extensions('before_batch', batch)
-        self.algorithm.process_batch(batch)
+        with TimeIt('batch', self.timer):
+            self.algorithm.process_batch(batch)
         self.status.iterations_done += 1
         self._run_extensions('after_batch', batch)
         self._check_finish_training('batch')
         return True
 
     def _run_extensions(self, method_name, *args):
-        for extension in self.extensions:
-            extension.dispatch(CallbackName(method_name), *args)
+        with TimeIt(method_name, self.timer):
+            for extension in self.extensions:
+                with TimeIt(type(extension).__name__, self.timer):
+                    extension.dispatch(CallbackName(method_name), *args)
 
     def _check_finish_training(self, level):
         """Checks whether the current training should be terminated.
